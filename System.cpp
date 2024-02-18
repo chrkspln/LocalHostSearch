@@ -1,42 +1,87 @@
-﻿#include "System.h"
+#include "System.h"
 #include <iostream>
 
-// тут я визначаю чи в юзера вінда чи лінукс аби правильно почати пошук
+/*
+ * defining whether root directory will be c:\ or /
+ * depending on OS
+ */
 #ifdef _WIN64
-#include <filesystem>
 std::filesystem::directory_entry System::starting_point{ "C:\\" };
 #elif _WIN32
-#include <filesystem>
 std::filesystem::directory_entry System::starting_point{ "C:\\" };
 #elif __linux__
-#include <filesystem>
 std::filesystem::directory_entry System::starting_point{ "/" };
 #endif
 
-// функція пошуку
-std::filesystem::path System::find_file_path(const std::string& file_name)
+
+std::atomic<bool> System::file_is_found = false;
+std::vector<std::jthread> System::threads{};
+
+
+std::filesystem::path System::find_file_path(const std::string& file_name, 
+												const std::filesystem::directory_entry& start_path)
 {
-	// тут я через фор пробігаюсь по n-нній кількості directory_entry
-	// за виключенням тих директорій які потребують права адміна
-	for (const auto& entry : std::filesystem::recursive_directory_iterator(System::starting_point,
-		std::filesystem::directory_options::skip_permission_denied)) {
-		try {
-			// порівнюю ім'я файла (тут і директорії порівнюються але за умови
-			// шо юзер не дибіл і ввів екстеншн файла то все буде норм)
-			if (entry.path().filename() == file_name) {
-				// повертаю шлях файла назву якого ввів юзер
-				return entry.path();
+	/*
+	 * function's logic:
+	 *
+	 * while file isn't found, traverse directory (excluding admin dirs),
+	 * if file is found, change the flag to 'true' and tell other threads to stop searching.
+	 * return file path.
+	 */
+	while (!System::file_is_found.load(std::memory_order::acquire)) {
+		for (const auto& entry : std::filesystem::recursive_directory_iterator(start_path,
+									std::filesystem::directory_options::skip_permission_denied)) {
+			try {
+				if (entry.path().filename() == file_name) {
+					std::cout << "found file here: " << entry.path() << '\n';
+					System::file_is_found.store(true, std::memory_order::release);
+					System::file_is_found.notify_all();
+					return entry.path();
+				}
+			}
+			/*
+			 * if an exception is thrown, handle it
+			 * by outputting the description to console.
+			 */
+			catch (std::exception& ex) {
+				System::file_is_found.notify_all();
+				std::cerr << "Error: " << ex.what() << '\n';
 			}
 		}
-		// якшо шось іде по пизді то виводжу ексепшн
-		// але взагалі єдиний ексепшн цього коду наразі це якшо файл дуже далеко
-		// знаходиться на компі тоді там просто по часу програма не встигає
-		// його знайти. буду робити треди
-		catch (std::exception& ex) {
-			std::cerr << "Error: " << ex.what() << '\n';
+	}
+	// if nothing is found, return empty path.
+	return {};
+}
+
+
+void System::thread_search(const std::string& file_name)
+{
+	/*
+	 * function logic:
+	 *
+	 * search for all subdirectories in root directory and
+	 * create a thread to search user's file in every one of them.
+	 * if there is a file on root directory, check whether it
+	 * is the one we search for. if it is, set flag file_is_found
+	 * to true and exit. if it is not, continue searching.
+	 */
+	for (const std::filesystem::directory_entry& dir_entry :
+		std::filesystem::directory_iterator(System::starting_point,
+			std::filesystem::directory_options::skip_permission_denied)) {
+		if (!System::file_is_found) {
+			if (dir_entry.is_directory())
+			{
+				System::threads.emplace_back([file_name, dir_entry]()
+					{ find_file_path(file_name, dir_entry); });
+			}
+			else if (dir_entry.is_regular_file() &&
+				dir_entry.path().filename() == file_name)
+			{
+				std::cout << "file is directly on disk C. location: " << dir_entry.path() << '\n';
+				System::file_is_found.store(true, std::memory_order::release);
+				System::file_is_found.notify_all();
+				break;
+			}
 		}
 	}
-	// якшо програма не знайшла файл - виводиться пустий рядок
-	// треба буде зробити можливість шукати файл знову через do-while
-	return {};
 }
